@@ -8,9 +8,28 @@ import (
 
 func main() {
 	router := gin.Default()
+
 	router.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "pong",
+		})
+	})
+
+	router.POST("/login", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "login successful",
+		})
+	})
+
+	router.GET("/search", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "search completed",
+		})
+	})
+
+	router.POST("/purchase", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "purchase successful",
 		})
 	})
 
