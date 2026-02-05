@@ -12,8 +12,8 @@ Traditional rate limiters treat all traffic as equal. In practice, abuse is cont
 3. **Context-blindness** ignores the fact that a failed login attempt is more "expensive" than a successful search.
 
 ## 🏗️ System Architecture
+<img width="420" height="783" alt="image" src="https://github.com/user-attachments/assets/60203047-9745-4727-a2da-6bc551bdd6b9" />
 
-<img width="476" height="1020" alt="image" src="https://github.com/user-attachments/assets/fcf2d951-32fd-4ba0-8cff-1c9b2a8d84c6" />
 
 **High-level Architecture Diagram for MVP scope of Ankylosaurus middleware** 
 
