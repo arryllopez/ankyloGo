@@ -15,6 +15,8 @@ Traditional rate limiters treat all traffic as equal. In practice, abuse is cont
 
 <img width="476" height="1020" alt="image" src="https://github.com/user-attachments/assets/fcf2d951-32fd-4ba0-8cff-1c9b2a8d84c6" />
 
+**High-level Architecture Diagram for MVP scope of Ankylosaurus middleware** 
+
 
 ---
 
