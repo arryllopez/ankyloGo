@@ -1,91 +1,129 @@
-# ankylosaur 🦖 
-### **Abuse-Aware API Gateway (Currently only supporting the Gin framework :p)**
+# ankyloGo
 
-`ankylosaur` is a specialized request admission controller designed to distinguish between legitimate users and sophisticated abusers. Unlike traditional rate limiters that rely on static numeric thresholds, `ankylosaur` adapts its enforcement based on endpoint context, historical behavior, and probabilistic risk signals.
+Abuse-aware rate limiting middleware for [Gin](https://gin-gonic.com). Not just a rate limiter — it watches how traffic behaves and adapts.
 
----
+Traditional rate limiters treat all requests equally. ankyloGo applies context: a failed login costs more than a successful search, a sudden geo jump raises suspicion, and limits tighten automatically when behavior looks automated.
 
-## 💡 The Problem
-Traditional rate limiters treat all traffic as equal. In practice, abuse is contextual:
-1. **Static limits** are often too high to catch "low and slow" scraping.
-2. **Aggressive limits** cause false positives, frustrating real users during peak traffic.
-3. **Context-blindness** ignores the fact that a failed login attempt is more "expensive" than a successful search.
+```go
+import "github.com/arryllopez/ankylosaur/ankylogo"
 
-## 🏗️ System Architecture
-<img width="420" height="783" alt="image" src="https://github.com/user-attachments/assets/60203047-9745-4727-a2da-6bc551bdd6b9" />
+router.Use(ankylogo.New(ankylogo.Config{
+    Storage: redisStore,
+}))
+```
 
+## What It Does
 
-**High-level Architecture Diagram for MVP scope of Ankylosaurus middleware** 
-| Part                    | What it contains                              | Why it might matter for your middleware                          |
-| ----------------------- | --------------------------------------------- | ---------------------------------------------------------------- |
-| **IP / Remote address** | The client’s source IP                        | Detect high frequency, multiple clients from same IP             |
-| **HTTP Method**         | GET, POST, PUT, DELETE                        | Different endpoints can have different abuse patterns            |
-| **Path / Endpoint**     | `/login`, `/search`                           | Identify which action is being attempted                         |
-| **Query parameters**    | `?q=shoes`                                    | Optional — sometimes needed to detect scraping patterns          |
-| **Headers**             | User-Agent, Authorization, Content-Type, etc. | Detect bots, validate API keys, geo info                         |
-| **Body / Payload**      | JSON, form data                               | For later: maybe analyze failed login attempts, fraudulent input |
-| **Cookies**             | Session IDs, tokens                           | Optional for tracking user sessions                              |
-| **Timestamp**           | Request arrival time                          | Needed for sliding window / rate limiting                        |
-| **Protocol info**       | HTTP version, TLS info                        | Optional for advanced security signals                           |
+A token bucket + sliding window rate limiter with a feedback loop. The rate limiter enforces limits. A separate risk engine watches access patterns via Kafka and adjusts those limits per actor in real time.
 
-HTTP Requests all contain information like this, which can all be subject to the middleware to assess.
+```
+Request → Extract Identity (IP / API Key)
+        → Check Local Cache (L1)
+        → Check Redis (L2)
+        → Token Bucket + Sliding Window → ALLOW or DENY
+        → Async publish access log to Kafka
+                    ↓
+              Risk Engine (Kafka consumer, separate process)
+                    ↓
+              Writes risk score back to Redis
+                    ↓
+              Gateway reads score on next request → adjusts limits
+```
 
----
+## Rate Limiting
 
-## 🎯 Supported Endpoints & Risk Profiles
+Two algorithms, both must pass:
 
-The gateway applies different logic based on the intent of the request:
+- **Token Bucket** — handles bursts. Tokens refill at a steady rate. If the bucket is empty, request is denied. Allows legitimate traffic spikes while capping sustained abuse.
+- **Sliding Window Counter** — enforces sustained rate caps. Uses weighted interpolation across current and previous windows for accuracy without storing every timestamp.
 
-| Endpoint | Abuse Risk | Enforcement Strategy |
-| :--- | :--- | :--- |
-| `POST /login` | **High** | Cost-based limiting; token price increases on auth failures. |
-| `GET /search` | **Medium** | Sliding window tracking; detects sustained scraping vs. bursts. |
-| `POST /purchase`| **Critical** | Low-latency fraud check; prioritized tokens; strict idempotency. |
+Limits are tracked **per IP** and **per API key** independently.
 
----
+## Endpoint Risk Profiles
 
-## 🛡️ Admission Logic
+Different endpoints get different treatment:
 
-### 1. Rate Limiting Primitives
-* **Token Bucket:** Allows for natural bursts in traffic to protect User Experience.
-* **Sliding Window:** Tracks sustained rates to identify automated crawlers.
-* **Cost Factor:** Not all requests cost "1" token. Risky behavior increases request cost.
+| Endpoint | Risk | Bucket Size | Refill | Window Limit | Fail Mode | Cost |
+|---|---|---|---|---|---|---|
+| `GET /ping` | Low | 1000 | 100/s | — | Open | 1 |
+| `POST /login` | High | 20 | 2/s | 10/min | Closed | 2 (+5 on failure) |
+| `GET /search` | Medium | 50 | 5/s | — | Open | 1 |
+| `POST /purchase` | Critical | 10 | 1/s | 5/min | Closed | 5 |
 
-### 2. Decision Flow
-* Check local cache for immediate "Allow" (Hot-key optimization).
-* Fetch policy overrides (e.g., "Is this IP currently in a cooldown?").
-* Execute atomic "Check-and-Decrement" on distributed state.
-* Emit access log to the async pipeline.
+**Fail-open:** If Redis is unreachable, `/ping` and `/search` still serve traffic.
+**Fail-closed:** `/login` and `/purchase` deny requests when state can't be verified.
 
----
+## Storage
 
-## 🧠 Risk Engine & Enforcement
-The Risk Engine continuously evaluates the "Health" of an API Key or IP based on:
-* **Failure Storms:** Rapid failures on sensitive endpoints.
-* **Cardinality:** Unexpectedly high number of different resources accessed by one actor.
-* **Churn:** Rapidly changing identifiers (User-Agents, etc.) from a single source.
+Two-tier architecture:
 
-### Dynamic Actions
-| Risk Level | Action Taken |
-| :--- | :--- |
-| **Moderate** | Reduce bucket burst capacity. |
-| **High** | Increase token cost per request. |
-| **Critical** | Enforce "Step-up" (require new token/challenge). |
-| **Extreme** | Immediate cooldown period. |
+- **L1 — In-memory LRU cache** for hot keys. 1-second TTL. Only caches "comfortably allowed" decisions (tokens > 20% capacity). Reduces Redis roundtrips ~80%.
+- **L2 — Redis** is the source of truth. All writes go to Redis. Atomic check-and-decrement via Lua scripts. Singleflight prevents cache stampedes on L1 miss.
 
----
+## Kafka Pipeline
 
-## ⚡ Reliability & Fail-Safes
-* **Fail-Open:** If the distributed state or risk engine is unreachable, the gateway fails open (except for `/purchase`) to prioritize availability.
-* **Non-Blocking Observability:** The gateway never waits for the logging pipeline. If the pipeline lags, logs are dropped to protect the request path.
-* **Reversibility:** Every enforcement action has a decay period. There are no permanent bans, allowing the system to recover from false positives automatically.
+The middleware async-publishes an access log event for every request. A bounded in-memory queue sits between the middleware and the Kafka producer. If the queue fills up, events are dropped — the request path is never blocked by observability.
 
----
+Access log events include: actor hash, endpoint, method, status code, user agent, decision, timestamps.
 
-## 🚦 Demonstration Tool
-The included CLI tool allows you to simulate:
-* **Credential Stuffing:** High-frequency login failures.
-* **Search Scraping:** Steady, long-term GET requests.
-* **Legitimate Bursts:** Short-lived spikes from a single user.
+## Risk Engine
 
-The gateway logs will output the **reasoning** behind every deny (e.g., `DENY: IP_COOLDOWN_ACTIVE` or `DENY: INSUFFICIENT_TOKENS_COST_4`).
+A separate Kafka consumer process that scores actors based on five pattern detectors:
+
+| Pattern | Weight | What It Detects |
+|---|---|---|
+| Failed auth storms | 0.35 | Rapid 401/403 responses — credential stuffing |
+| Geo jumps | 0.25 | Impossible travel between consecutive requests |
+| User-Agent churn | 0.15 | Frequent UA rotation — bot behavior |
+| Endpoint cardinality | 0.15 | Too many unique endpoints — API scraping |
+| Request spikes | 0.10 | Current rate vs historical baseline |
+
+Final score = weighted sum, range 0.0–1.0. Scores decay with a 30-minute half-life — no permanent bans.
+
+## Dynamic Enforcement
+
+The gateway reads the actor's risk score from Redis on each request and adjusts limits:
+
+| Score | Action |
+|---|---|
+| < 0.3 | Normal limits |
+| 0.3 – 0.5 | Reduce burst capacity (0.7x) |
+| 0.5 – 0.7 | Increase request cost (2x) |
+| 0.7 – 0.85 | Require step-up auth on high/critical endpoints |
+| >= 0.85 | Cooldown — deny all requests for 5 minutes |
+
+Graduated response. Requires 2+ correlated signals before any action. Grace period for new actors.
+
+## Replay Tool
+
+CLI tool to simulate traffic patterns against the gateway and observe decisions in logs:
+
+- **Credential stuffing** — rapid failed logins from rotating IPs
+- **Scraper** — steady enumeration of search endpoints
+- **Legitimate burst** — short spike from a single user
+
+## Infrastructure
+
+Requires Redis and Kafka. Docker Compose config included for local dev:
+
+```
+redis:7          — distributed rate limit state
+zookeeper+kafka  — access log pipeline
+gateway          — your Gin app with ankyloGo middleware
+consumer         — risk engine (can run multiple replicas)
+```
+
+## Status
+
+Work in progress. Stub product API endpoints are set up. Core middleware implementation is next.
+
+## Key Tradeoffs
+
+These are the design decisions that make this more than a toy:
+
+- **Redis vs memory** — hot reads cached locally, all writes and near-limit decisions go to Redis
+- **Stampede avoidance** — singleflight deduplicates concurrent Redis fetches for the same key
+- **Idempotency** — `/purchase` retries with the same idempotency key don't double-count against limits
+- **At-least-once delivery** — Kafka may duplicate events; risk engine tolerates this because scoring is aggregate
+- **Backpressure** — bounded queue, drop on overflow, never block the request path
+- **False positives** — graduated response, auto-decay, allowlists, multi-signal requirement
