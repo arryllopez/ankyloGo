@@ -30,6 +30,12 @@ Request → Extract Identity (IP / API Key)
               Gateway reads score on next request → adjusts limits
 ```
 
+## More about the algorithms
+
+At its core, the token bucket algorithm looks like: 
+<img width="1069" height="610" alt="image" src="https://github.com/user-attachments/assets/6c174ee5-b826-475e-ab60-16f3d8ea0b6c" />
+
+
 ## Rate Limiting
 
 Two algorithms, both must pass:
