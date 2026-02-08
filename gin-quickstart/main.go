@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// token bucket algo
+// The following code block implements the Token Bucket Algoritm
 type TokenBucket struct {
 	tokens       int
 	capacity     int
@@ -78,8 +78,63 @@ func (tb *TokenBucket) StopRefiller() {
 	close(tb.stopRefiller)
 }
 
+// The following block implements the sliding window algorithm
+
+type RateLimiter interface {
+	SetRate(rate float64)
+	SetWindow(window time.Duration)
+	Allow() bool
+}
+
+type SlidingWindow struct {
+	mu      sync.Mutex
+	count   int
+	window  time.Duration
+	history []int
+}
+
+// increment method increments the request counter and adds the current ocunt to the history
+func (sw *SlidingWindow) increment() {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.count++
+	sw.history = append(sw.history, sw.count)
+}
+
+// removeExpired method removes expired ocunts
+func (sw *SlidingWindow) removeExpired(now time.Time) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	for len(sw.history) > 0 && now.Sub(time.Unix(0, int64(sw.history[0]))) >= sw.window {
+		sw.history = sw.history[1:]
+	}
+}
+
+func (sw *SlidingWindow) countRequests(now time.Time) int {
+	sw.removeExpired(now)
+	return len(sw.history)
+}
+
+func (sw *SlidingWindow) Allow() bool {
+	now := time.Now()
+	count := sw.countRequests(now)
+	if count >= sw.count {
+		return false
+	}
+	sw.increment()
+	return true
+}
+
+func (sw *SlidingWindow) SetRate(rate float64) {
+	sw.count = int(rate * float64(sw.window) / float64(time.Second))
+}
+
+func (sw *SlidingWindow) SetWindow(window time.Duration) {
+	sw.window = window
+}
+
 // implementing custom middleware
-// this Logging middleware will be where the algorithm that has rate limiting via token bucket algo
+// this Logging middleware will be where the algorithm that has rate limiting via token bucket algo and sliding window
 func Logger() gin.HandlerFunc {
 	var bucketPerIp sync.Map
 
