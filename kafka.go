@@ -38,6 +38,7 @@ func (k *KafkaPublisher) Publish(event RateLimitEvent) {
 	// 1. Serialize the RateLimitEvent to JSON
 	eventBytes, err := json.Marshal(event)
 	if err != nil {
+		fmt.Printf("failed to marshal RateLimitEvent: %v\n", err)
 		return
 	}
 

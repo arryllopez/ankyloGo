@@ -34,8 +34,8 @@ func (sw *SlidingWindowLimiter) Allow() bool {
 	defer sw.mutex.Unlock()
 
 	now := time.Now()
-	delta := now.Unix() - sw.window
-	edgeTime := time.Unix(delta, 0)
+	// Use full nanosecond precision instead of truncating to seconds
+	edgeTime := now.Add(-time.Duration(sw.window) * time.Second)
 
 	// Remove outdated logs
 	for sw.logs.Len() > 0 {

@@ -11,35 +11,101 @@ import (
 )
 
 type RiskScore struct {
-	score       int64
+	score       int
 	lastUpdated time.Time
 	notified    bool
 	mu          sync.Mutex
 }
 
 type ThresholdNotifier interface {
-	Notify(ip string, score int64)
+	Notify(ip string, score int)
 }
 
 type RiskEngine struct {
-	client      *kgo.Client
-	ipScores    sync.Map
-	threshold   int64
-	topic       string
-	decayRate   time.Duration
-	OnThreshold ThresholdNotifier
+	client                      *kgo.Client
+	ipScores                    sync.Map
+	threshold                   int
+	topic                       string
+	decayRate                   time.Duration
+	OnThreshold                 ThresholdNotifier
+	customWeightAllowed         int
+	customWeightBucket          int
+	customWeightWindow          int
+	customWeightPassedThreshold int
 }
 
-func NewRiskEngine(client *kgo.Client, threshold int64, topic string, decayRate time.Duration) *RiskEngine {
-	return &RiskEngine{
-		client:    client,
-		threshold: threshold,
-		topic:     topic,
-		decayRate: decayRate,
+// RiskEngineOption is a function that configures a RiskEngine
+type RiskEngineOption func(*RiskEngine)
+
+// WithWeightAllowed sets the weight for ALLOWED events (default: 0)
+func WithWeightAllowed(weight int) RiskEngineOption {
+	return func(r *RiskEngine) {
+		r.customWeightAllowed = weight
 	}
 }
 
-func NewRiskScore(score int64, lastUpdated time.Time) *RiskScore {
+// WithWeightWindow sets the weight for DENIED_WINDOW events (default: 1)
+func WithWeightWindow(weight int) RiskEngineOption {
+	return func(r *RiskEngine) {
+		r.customWeightWindow = weight
+	}
+}
+
+// WithWeightBucket sets the weight for DENIED_BUCKET events (default: 4)
+func WithWeightBucket(weight int) RiskEngineOption {
+	return func(r *RiskEngine) {
+		r.customWeightBucket = weight
+	}
+}
+
+// WithWeightPassedThreshold sets the weight for DENIED_RISK events (default: 10)
+func WithWeightPassedThreshold(weight int) RiskEngineOption {
+	return func(r *RiskEngine) {
+		r.customWeightPassedThreshold = weight
+	}
+}
+
+// WithThresholdNotifier sets a custom threshold notifier
+func WithThresholdNotifier(notifier ThresholdNotifier) RiskEngineOption {
+	return func(r *RiskEngine) {
+		r.OnThreshold = notifier
+	}
+}
+
+// WithDecayRate sets the decay rate (default: 0 - no decay)
+func WithDecayRate(rate time.Duration) RiskEngineOption {
+	return func(r *RiskEngine) {
+		r.decayRate = rate
+	}
+}
+
+// NewRiskEngine creates a new RiskEngine with default weights (0, 1, 4, 10)
+// Required parameters: client, threshold, topic
+// Optional parameters: use With* option functions
+func NewRiskEngine(client *kgo.Client, threshold int, topic string, opts ...RiskEngineOption) *RiskEngine {
+	// Create engine with defaults
+	engine := &RiskEngine{
+		client:                      client,
+		threshold:                   threshold,
+		topic:                       topic,
+		decayRate:                   0, // default: no decay
+		OnThreshold:                 nil, // default: no notifier
+		customWeightAllowed:         0,  // default: 0
+		customWeightWindow:          1,  // default: 1
+		customWeightBucket:          4,  // default: 4
+		customWeightPassedThreshold: 10, // default: 10
+		ipScores:                    sync.Map{},
+	}
+
+	// Apply custom options
+	for _, opt := range opts {
+		opt(engine)
+	}
+
+	return engine
+}
+
+func NewRiskScore(score int, lastUpdated time.Time) *RiskScore {
 	return &RiskScore{
 		score:       score,
 		lastUpdated: lastUpdated,
@@ -48,7 +114,7 @@ func NewRiskScore(score int64, lastUpdated time.Time) *RiskScore {
 
 // GetScore returns the current effective risk score for an IP,
 // applying time-based decay without modifying stored state
-func (r *RiskEngine) GetScore(ip string) int64 {
+func (r *RiskEngine) GetScore(ip string) int {
 	val, ok := r.ipScores.Load(ip)
 	if !ok {
 		return 0
@@ -60,7 +126,7 @@ func (r *RiskEngine) GetScore(ip string) int64 {
 	if r.decayRate > 0 {
 		now := time.Now()
 		elapsed := now.Sub(riskScore.lastUpdated)
-		intervals := int64(elapsed / r.decayRate)
+		intervals := int(elapsed / r.decayRate)
 		current -= intervals
 	}
 	if current < 0 {
@@ -74,7 +140,7 @@ func (r *RiskEngine) GetScore(ip string) int64 {
 // is in place, so for example if interval was 30 minutes then if no failed api calls happen within 2 hours
 // the specific ip's risk score gets deducted by 4 points since there are 120 minutes in 2 hours and
 // 120 / 30 =  4
-func (r *RiskEngine) processEvent(event RateLimitEvent) (int64, bool) {
+func (r *RiskEngine) processEvent(event RateLimitEvent) (int, bool) {
 	// bump the score for the ip for each denied event
 	newScore := &RiskScore{lastUpdated: time.Now()}
 	score, _ := r.ipScores.LoadOrStore(event.IP, newScore)
@@ -83,7 +149,7 @@ func (r *RiskEngine) processEvent(event RateLimitEvent) (int64, bool) {
 	now := time.Now()
 	if r.decayRate > 0 {
 		elapsed := now.Sub(riskScore.lastUpdated)
-		intervals := int64(elapsed / r.decayRate)
+		intervals := int(elapsed / r.decayRate)
 		riskScore.score -= intervals
 	}
 	if riskScore.score < 0 {
@@ -93,9 +159,21 @@ func (r *RiskEngine) processEvent(event RateLimitEvent) (int64, bool) {
 	if riskScore.score <= r.threshold {
 		riskScore.notified = false
 	}
-	riskScore.score += 1
+
+	switch event.Action {
+	case "ALLOWED":
+		riskScore.score += r.customWeightAllowed
+	case "DENIED_WINDOW":
+		riskScore.score += r.customWeightWindow
+	case "DENIED_BUCKET":
+		riskScore.score += r.customWeightBucket
+	case "DENIED_RISK":
+		riskScore.score += r.customWeightPassedThreshold
+	}
+
 	riskScore.lastUpdated = now
 	currentScore := riskScore.score
+
 	// only signal notification on the first crossing
 	shouldNotify := false
 	if currentScore > r.threshold && !riskScore.notified {

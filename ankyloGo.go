@@ -10,11 +10,11 @@ import (
 
 // ScoreReader returns the current risk score for an IP
 type ScoreReader interface {
-	GetScore(ip string) int64
+	GetScore(ip string) int
 }
 
 type Config struct {
-	// sliding wzndow
+	// sliding window
 	Window int64
 	Limit  int
 	// token bucket
@@ -26,9 +26,68 @@ type Config struct {
 	// risk scoring — if ScoreReader is set, the middleware adjusts limits based on risk
 	// DenyScore is the score at which all requests are denied (0 = disabled)
 	ScoreReader ScoreReader
-	DenyScore   int64
+	DenyScore   int
 }
 
+// ConfigOption is a function that configures a Config
+type ConfigOption func(*Config)
+
+// WithSlidingWindow enables sliding window rate limiting
+func WithSlidingWindow(window int64, limit int) ConfigOption {
+	return func(c *Config) {
+		c.Window = window
+		c.Limit = limit
+	}
+}
+
+// WithTokenBucket enables token bucket rate limiting
+func WithTokenBucket(capacity, tokensPerInterval int, refillRate time.Duration) ConfigOption {
+	return func(c *Config) {
+		c.Capacity = capacity
+		c.TokensPerInterval = tokensPerInterval
+		c.RefillRate = refillRate
+	}
+}
+
+// WithEventPublisher sets the Kafka event publisher
+func WithEventPublisher(publisher EventPublisher) ConfigOption {
+	return func(c *Config) {
+		c.EventPublisher = publisher
+	}
+}
+
+// WithRiskScoring enables risk-based progressive throttling
+func WithRiskScoring(scoreReader ScoreReader, denyScore int) ConfigOption {
+	return func(c *Config) {
+		c.ScoreReader = scoreReader
+		c.DenyScore = denyScore
+	}
+}
+
+// NewConfig creates a new Config with optional configurations
+// By default, no rate limiting is enabled. Use With* options to configure.
+func NewConfig(opts ...ConfigOption) Config {
+	config := Config{
+		// Defaults: all disabled
+		Window:            0,
+		Limit:             0,
+		Capacity:          0,
+		TokensPerInterval: 0,
+		RefillRate:        0,
+		EventPublisher:    nil,
+		ScoreReader:       nil,
+		DenyScore:         0,
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(&config)
+	}
+
+	return config
+}
+
+// DefaultConfig returns a Config with sensible defaults for basic rate limiting
 func DefaultConfig() Config {
 	return Config{
 		Window:            60,
@@ -44,6 +103,27 @@ func DefaultConfig() Config {
 func RateLimiterMiddleware(store RateLimiterStore, config Config, endpointPolicies ...map[string]Config) gin.HandlerFunc {
 	if config.Window == 0 && config.Limit == 0 && config.Capacity == 0 {
 		log.Println("warning: no rate limiting configured, all requests will pass through")
+	}
+
+	// Validate token bucket configuration
+	if config.Capacity > 0 && config.RefillRate <= 0 {
+		log.Println("warning: token bucket enabled (Capacity > 0) but RefillRate is zero or negative - token bucket will not refill")
+	}
+
+	// Validate negative values
+	if config.Limit < 0 {
+		log.Println("warning: Limit is negative, which may cause unexpected behavior")
+	}
+	if config.Capacity < 0 {
+		log.Println("warning: Capacity is negative, which may cause unexpected behavior")
+	}
+	if config.TokensPerInterval < 0 {
+		log.Println("warning: TokensPerInterval is negative, which may cause unexpected behavior")
+	}
+
+	// Validate risk scoring configuration
+	if config.DenyScore > 0 && config.ScoreReader == nil {
+		log.Println("warning: DenyScore is set but ScoreReader is nil - risk scoring will not work")
 	}
 
 	return func(c *gin.Context) {

@@ -140,10 +140,10 @@ func TestMiddlewareNoRateLimiting(t *testing.T) {
 
 // mock ScoreReader for testing enforcement tiers
 type mockScoreReader struct {
-	scores map[string]int64
+	scores map[string]int
 }
 
-func (m *mockScoreReader) GetScore(ip string) int64 {
+func (m *mockScoreReader) GetScore(ip string) int {
 	if score, ok := m.scores[ip]; ok {
 		return score
 	}
@@ -161,7 +161,7 @@ func TestMiddlewareRiskDenyAll(t *testing.T) {
 		Capacity: 100,
 		ScoreReader: &mockScoreReader{
 			// all IPs get score 10 (empty string key since httptest has no RemoteAddr)
-			scores: map[string]int64{"": 10},
+			scores: map[string]int{"": 10},
 		},
 		DenyScore: 10,
 	}
@@ -185,7 +185,7 @@ func TestMiddlewareRiskReducedLimits(t *testing.T) {
 		TokensPerInterval: 0,
 		RefillRate:        time.Second,
 		ScoreReader: &mockScoreReader{
-			scores: map[string]int64{"": 5},
+			scores: map[string]int{"": 5},
 		},
 		DenyScore: 10,
 	}
@@ -217,7 +217,7 @@ func TestMiddlewareRiskZeroScore(t *testing.T) {
 		TokensPerInterval: 0,
 		RefillRate:        time.Second,
 		ScoreReader: &mockScoreReader{
-			scores: map[string]int64{"": 0},
+			scores: map[string]int{"": 0},
 		},
 		DenyScore: 10,
 	}
@@ -248,7 +248,7 @@ func TestMiddlewareRiskDoesNotEnableDisabledAlgorithm(t *testing.T) {
 		Limit:  10,
 		// Capacity is 0 — token bucket intentionally disabled
 		ScoreReader: &mockScoreReader{
-			scores: map[string]int64{"": 5},
+			scores: map[string]int{"": 5},
 		},
 		DenyScore: 10,
 	}

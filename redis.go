@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -103,7 +104,15 @@ func (r *RedisStore) AllowedSlidingWindow(ip string, window int64, limit int) bo
 
 	// Generate a unique member ID to avoid collisions when timestamps are identical
 	randBytes := make([]byte, 8)
-	rand.Read(randBytes)
+	if _, err := rand.Read(randBytes); err != nil {
+		// If random read fails, fall back to timestamp-only member ID
+		member := strconv.FormatInt(now, 10)
+		result, err := r.redisConnect.Eval(ctx, slidingWindowScript, []string{key}, now, cutoff, limit, window, member).Int64()
+		if err != nil {
+			return true
+		}
+		return result == 1
+	}
 	member := hex.EncodeToString(randBytes)
 
 	result, err := r.redisConnect.Eval(ctx, slidingWindowScript, []string{key}, now, cutoff, limit, window, member).Int64()
@@ -115,6 +124,12 @@ func (r *RedisStore) AllowedSlidingWindow(ip string, window int64, limit int) bo
 }
 
 func (r *RedisStore) AllowedTokenBucket(ip string, capacity, tokensPerInterval int, refillRate time.Duration) bool {
+	// Validate refillRate to prevent division by zero
+	if refillRate <= 0 {
+		// Invalid config: fail open (allow the request)
+		return true
+	}
+
 	ctx := context.Background()
 	now := time.Now().Unix()
 	key := "bucket:" + ip

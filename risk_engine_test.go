@@ -5,15 +5,24 @@ import (
 	"time"
 )
 
+// Helper to create a test RiskEngine with default weights (0, 1, 4, 10)
+func newTestEngine(threshold int, decayRate time.Duration) *RiskEngine {
+	return &RiskEngine{
+		threshold:                   threshold,
+		decayRate:                   decayRate,
+		customWeightAllowed:         0,
+		customWeightWindow:          1,
+		customWeightBucket:          4,
+		customWeightPassedThreshold: 10,
+	}
+}
+
 /*
 Test that the first denied event for an IP sets the score to 1
 A brand new IP with no history should start at exactly 1
 */
 func TestRiskScoreFirstEvent(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 5,
-		decayRate: 30 * time.Minute,
-	}
+	engine := newTestEngine(5, 30*time.Minute)
 
 	event := RateLimitEvent{
 		IP:        "192.168.1.1",
@@ -30,13 +39,10 @@ func TestRiskScoreFirstEvent(t *testing.T) {
 
 /*
 Test that multiple rapid events from the same IP accumulate correctly
-5 events with no time for decay should produce a score of exactly 5
+5 DENIED_BUCKET events (weight 4 each) should produce a score of 20
 */
 func TestRiskScoreMultipleEvents(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 10,
-		decayRate: 30 * time.Minute,
-	}
+	engine := newTestEngine(10, 30*time.Minute)
 
 	event := RateLimitEvent{
 		IP:        "10.0.0.1",
@@ -45,13 +51,13 @@ func TestRiskScoreMultipleEvents(t *testing.T) {
 		Timestamp: time.Now().UnixNano(),
 	}
 
-	var lastScore int64
+	var lastScore int
 	for i := 0; i < 5; i++ {
 		lastScore, _ = engine.processEvent(event)
 	}
 
-	if lastScore != 5 {
-		t.Errorf("After 5 rapid events score should be 5, got %d", lastScore)
+	if lastScore != 20 {
+		t.Errorf("After 5 rapid DENIED_BUCKET events (weight 4) score should be 20, got %d", lastScore)
 	}
 }
 
@@ -60,10 +66,7 @@ Test that different IPs have completely isolated scores
 Events from IP A should not affect IP B's score
 */
 func TestRiskScoreIsolatedIPs(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 10,
-		decayRate: 30 * time.Minute,
-	}
+	engine := newTestEngine(10, 30*time.Minute)
 
 	eventA := RateLimitEvent{IP: "1.1.1.1", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 	eventB := RateLimitEvent{IP: "2.2.2.2", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
@@ -92,10 +95,7 @@ With a decay rate of 100ms, after 350ms a score of 5 should decay by 3
 Then +1 for the new event = 3
 */
 func TestRiskScoreDecay(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 10,
-		decayRate: 100 * time.Millisecond,
-	}
+	engine := newTestEngine(10, 100*time.Millisecond)
 
 	event := RateLimitEvent{IP: "10.0.0.5", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
@@ -116,28 +116,24 @@ func TestRiskScoreDecay(t *testing.T) {
 
 /*
 Test that score decay floors at 0 and never goes negative
-With a score of 2 and enough time for 10 decay intervals,
-the score should floor at 0 then +1 for the new event = 1
+With DENIED_BUCKET (weight 4): 2 events = 8, decay 6 intervals = 8-6=2, then +4 = 6
 */
 func TestRiskScoreDecayFloor(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 10,
-		decayRate: 100 * time.Millisecond,
-	}
+	engine := newTestEngine(10, 100*time.Millisecond)
 
 	event := RateLimitEvent{IP: "172.16.0.1", Endpoint: "GET /search", Action: "DENIED_BUCKET", Timestamp: time.Now().UnixNano()}
 
-	// Build up score to 2
+	// Build up score: 2 events × weight 4 = 8
 	engine.processEvent(event)
 	engine.processEvent(event)
 
-	// Wait long enough that decay far exceeds current score
+	// Wait for 6 decay intervals: 8 - 6 = 2
 	time.Sleep(600 * time.Millisecond)
 
-	// Score was 2, decay 6, floors at 0, +1 = 1
+	// Score was 8, decay 6 = 2, +4 for new event = 6
 	score, _ := engine.processEvent(event)
-	if score != 1 {
-		t.Errorf("After excessive decay, score should floor at 0 then +1 = 1, got %d", score)
+	if score != 6 {
+		t.Errorf("After decay, score should be 8-6+4 = 6, got %d", score)
 	}
 }
 
@@ -147,10 +143,7 @@ With a threshold of 3, events 1-3 should be at or below threshold
 The 4th event should cross it
 */
 func TestRiskScoreThresholdCrossing(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 3,
-		decayRate: 30 * time.Minute,
-	}
+	engine := newTestEngine(3, 30*time.Minute)
 
 	event := RateLimitEvent{IP: "192.168.0.100", Endpoint: "POST /login", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
@@ -174,10 +167,7 @@ Test GetScore returns the correct effective score without modifying state
 Build up a score of 3, then verify GetScore returns 3 without changing it
 */
 func TestRiskScoreGetScore(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 10,
-		decayRate: 30 * time.Minute,
-	}
+	engine := newTestEngine(10, 30*time.Minute)
 
 	event := RateLimitEvent{IP: "10.10.10.10", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
@@ -202,10 +192,7 @@ func TestRiskScoreGetScore(t *testing.T) {
 Test GetScore returns 0 for an unknown IP
 */
 func TestRiskScoreGetScoreUnknownIP(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 10,
-		decayRate: 30 * time.Minute,
-	}
+	engine := newTestEngine(10, 30*time.Minute)
 
 	score := engine.GetScore("99.99.99.99")
 	if score != 0 {
@@ -219,10 +206,7 @@ Build up score to 5, wait for decay, verify GetScore returns decayed value
 Then verify processEvent still decays from original stored values
 */
 func TestRiskScoreGetScoreWithDecay(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 10,
-		decayRate: 100 * time.Millisecond,
-	}
+	engine := newTestEngine(10, 100*time.Millisecond)
 
 	event := RateLimitEvent{IP: "10.0.0.99", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
@@ -247,11 +231,11 @@ Uses a mock notifier to capture the notification
 */
 type mockNotifier struct {
 	calledIP    string
-	calledScore int64
+	calledScore int
 	callCount   int
 }
 
-func (m *mockNotifier) Notify(ip string, score int64) {
+func (m *mockNotifier) Notify(ip string, score int) {
 	m.calledIP = ip
 	m.calledScore = score
 	m.callCount++
@@ -259,11 +243,8 @@ func (m *mockNotifier) Notify(ip string, score int64) {
 
 func TestRiskScoreThresholdNotifier(t *testing.T) {
 	notifier := &mockNotifier{}
-	engine := &RiskEngine{
-		threshold:   3,
-		decayRate:   30 * time.Minute,
-		OnThreshold: notifier,
-	}
+	engine := newTestEngine(3, 30*time.Minute)
+	engine.OnThreshold = notifier
 
 	event := RateLimitEvent{IP: "192.168.1.50", Endpoint: "POST /login", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
@@ -312,15 +293,12 @@ Test that decayRate of 0 does not panic and scores accumulate without decay
 With no decay configured, score should just keep going up
 */
 func TestRiskScoreZeroDecayRate(t *testing.T) {
-	engine := &RiskEngine{
-		threshold: 10,
-		decayRate: 0,
-	}
+	engine := newTestEngine(10, 0)
 
 	event := RateLimitEvent{IP: "10.0.0.50", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
 	// 5 events should accumulate to 5 with no decay
-	var lastScore int64
+	var lastScore int
 	for i := 0; i < 5; i++ {
 		lastScore, _ = engine.processEvent(event)
 	}
