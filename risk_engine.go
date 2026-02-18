@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ type RiskEngine struct {
 	customWeightBucket          int
 	customWeightWindow          int
 	customWeightPassedThreshold int
+	useHalfLife                 bool
 }
 
 // RiskEngineOption is a function that configures a RiskEngine
@@ -79,6 +81,12 @@ func WithDecayRate(rate time.Duration) RiskEngineOption {
 	}
 }
 
+func WithHalfLifeDecay() RiskEngineOption {
+	return func(r *RiskEngine) {
+		r.useHalfLife = true
+	}
+}
+
 // NewRiskEngine creates a new RiskEngine with default weights (0, 1, 4, 10)
 // Required parameters: client, threshold, topic
 // Optional parameters: use With* option functions
@@ -88,12 +96,12 @@ func NewRiskEngine(client *kgo.Client, threshold int, topic string, opts ...Risk
 		client:                      client,
 		threshold:                   threshold,
 		topic:                       topic,
-		decayRate:                   0, // default: no decay
+		decayRate:                   0,   // default: no decay
 		OnThreshold:                 nil, // default: no notifier
-		customWeightAllowed:         0,  // default: 0
-		customWeightWindow:          1,  // default: 1
-		customWeightBucket:          4,  // default: 4
-		customWeightPassedThreshold: 10, // default: 10
+		customWeightAllowed:         0,   // default: 0
+		customWeightWindow:          1,   // default: 1
+		customWeightBucket:          4,   // default: 4
+		customWeightPassedThreshold: 10,  // default: 10
 		ipScores:                    sync.Map{},
 	}
 
@@ -113,7 +121,6 @@ func NewRiskScore(score int, lastUpdated time.Time) *RiskScore {
 }
 
 // GetScore returns the current effective risk score for an IP,
-// applying time-based decay without modifying stored state
 func (r *RiskEngine) GetScore(ip string) int {
 	val, ok := r.ipScores.Load(ip)
 	if !ok {
@@ -126,9 +133,15 @@ func (r *RiskEngine) GetScore(ip string) int {
 	if r.decayRate > 0 {
 		now := time.Now()
 		elapsed := now.Sub(riskScore.lastUpdated)
-		intervals := int(elapsed / r.decayRate)
-		current -= intervals
+		if r.useHalfLife {
+			factor := math.Pow(0.5, elapsed.Seconds()/r.decayRate.Seconds())
+			current = int(float64(current) * factor)
+		} else {
+			intervals := int(elapsed / r.decayRate)
+			current -= intervals
+		}
 	}
+
 	if current < 0 {
 		current = 0
 	}
@@ -140,6 +153,7 @@ func (r *RiskEngine) GetScore(ip string) int {
 // is in place, so for example if interval was 30 minutes then if no failed api calls happen within 2 hours
 // the specific ip's risk score gets deducted by 4 points since there are 120 minutes in 2 hours and
 // 120 / 30 =  4
+// half life decay halves the score after one decay rate interval if the option is enabled
 func (r *RiskEngine) processEvent(event RateLimitEvent) (int, bool) {
 	// bump the score for the ip for each denied event
 	newScore := &RiskScore{lastUpdated: time.Now()}
@@ -149,8 +163,13 @@ func (r *RiskEngine) processEvent(event RateLimitEvent) (int, bool) {
 	now := time.Now()
 	if r.decayRate > 0 {
 		elapsed := now.Sub(riskScore.lastUpdated)
-		intervals := int(elapsed / r.decayRate)
-		riskScore.score -= intervals
+		if r.useHalfLife {
+			factor := math.Pow(0.5, elapsed.Seconds()/r.decayRate.Seconds())
+			riskScore.score = int(float64(riskScore.score) * factor)
+		} else {
+			intervals := int(elapsed / r.decayRate)
+			riskScore.score -= intervals
+		}
 	}
 	if riskScore.score < 0 {
 		riskScore.score = 0

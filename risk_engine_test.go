@@ -52,7 +52,7 @@ func TestRiskScoreMultipleEvents(t *testing.T) {
 	}
 
 	var lastScore int
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		lastScore, _ = engine.processEvent(event)
 	}
 
@@ -72,7 +72,7 @@ func TestRiskScoreIsolatedIPs(t *testing.T) {
 	eventB := RateLimitEvent{IP: "2.2.2.2", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
 	// 3 events for IP A
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		engine.processEvent(eventA)
 	}
 
@@ -100,7 +100,7 @@ func TestRiskScoreDecay(t *testing.T) {
 	event := RateLimitEvent{IP: "10.0.0.5", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
 	// Build up score to 5
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		engine.processEvent(event)
 	}
 
@@ -148,7 +148,7 @@ func TestRiskScoreThresholdCrossing(t *testing.T) {
 	event := RateLimitEvent{IP: "192.168.0.100", Endpoint: "POST /login", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
 	// First 3 events should not exceed threshold
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		score, _ := engine.processEvent(event)
 		if score > engine.threshold {
 			t.Errorf("Event %d should not exceed threshold of 3, score is %d", i+1, score)
@@ -171,7 +171,7 @@ func TestRiskScoreGetScore(t *testing.T) {
 
 	event := RateLimitEvent{IP: "10.10.10.10", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		engine.processEvent(event)
 	}
 
@@ -211,7 +211,7 @@ func TestRiskScoreGetScoreWithDecay(t *testing.T) {
 	event := RateLimitEvent{IP: "10.0.0.99", Endpoint: "GET /ping", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
 	// Build up score to 5
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		engine.processEvent(event)
 	}
 
@@ -249,7 +249,7 @@ func TestRiskScoreThresholdNotifier(t *testing.T) {
 	event := RateLimitEvent{IP: "192.168.1.50", Endpoint: "POST /login", Action: "DENIED_WINDOW", Timestamp: time.Now().UnixNano()}
 
 	// First 3 events — shouldNotify must be false (scores 1, 2, 3 which are <= threshold)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, shouldNotify := engine.processEvent(event)
 		if shouldNotify {
 			t.Errorf("Event %d should not trigger notification (score <= threshold)", i+1)
@@ -299,7 +299,7 @@ func TestRiskScoreZeroDecayRate(t *testing.T) {
 
 	// 5 events should accumulate to 5 with no decay
 	var lastScore int
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		lastScore, _ = engine.processEvent(event)
 	}
 
@@ -311,5 +311,42 @@ func TestRiskScoreZeroDecayRate(t *testing.T) {
 	score := engine.GetScore("10.0.0.50")
 	if score != 5 {
 		t.Errorf("GetScore with zero decayRate should return 5, got %d", score)
+	}
+}
+
+/*
+Test that half-life decay exponentially halves the score after one decayRate period.
+2 DENIED_BUCKET events (weight 4 each) = score 8.
+After one half-life: int(8 * 0.5^1) = 4.
+We allow 3–4 due to slight timing variance (elapsed > 100ms when GetScore runs).
+*/
+func TestWithHalfLifeDecay(t *testing.T) {
+	engine := &RiskEngine{
+		threshold:                   20,
+		decayRate:                   100 * time.Millisecond,
+		useHalfLife:                 true,
+		customWeightAllowed:         0,
+		customWeightWindow:          1,
+		customWeightBucket:          4,
+		customWeightPassedThreshold: 10,
+	}
+
+	event := RateLimitEvent{
+		IP:        "192.168.10.1",
+		Endpoint:  "POST /api",
+		Action:    "DENIED_BUCKET",
+		Timestamp: time.Now().UnixNano(),
+	}
+
+	// 2 events × weight 4 = score 8
+	engine.processEvent(event)
+	engine.processEvent(event)
+
+	// Sleep one half-life: score should halve from 8 → 4
+	time.Sleep(100 * time.Millisecond)
+
+	score := engine.GetScore("192.168.10.1")
+	if score < 3 || score > 4 {
+		t.Errorf("After one half-life, score should be ~4 (got %d)", score)
 	}
 }
