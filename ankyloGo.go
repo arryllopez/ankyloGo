@@ -35,6 +35,8 @@ type Config struct {
 	// DenyScore is the score at which all requests are denied (0 = disabled)
 	ScoreReader ScoreReader
 	DenyScore   int
+	// latencyObserver is set by WithMiddlewareLatency; nil means no timing.
+	latencyObserver func(endpoint string, seconds float64)
 }
 
 // ConfigOption is a function that configures a Config
@@ -150,6 +152,11 @@ func RateLimiterMiddleware(store RateLimiterStore, config Config, endpointPolici
 
 		// Build key from method + path: "POST /login", "GET /search"
 		key := c.Request.Method + " " + c.FullPath()
+
+		if config.latencyObserver != nil {
+			start := time.Now()
+			defer func() { config.latencyObserver(key, time.Since(start).Seconds()) }()
+		}
 
 		// Check if this endpoint has a specific policy
 		activeConfig := config // default fallback
