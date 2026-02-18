@@ -266,7 +266,7 @@ docker compose up -d
 | Prometheus | http://localhost:9090 | — |
 | Grafana | http://localhost:3000 | admin / admin |
 
-Prometheus scrapes your app at `host.docker.internal:8081`. Grafana auto-provisions Prometheus as a datasource.
+Prometheus is configured to scrape `host.docker.internal:8081` by default — update `monitoring/prometheus.yml` to match whatever port your app runs on. Grafana auto-provisions Prometheus as a datasource.
 
 ---
 
