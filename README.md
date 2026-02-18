@@ -76,7 +76,7 @@ func main() {
 
     store  := ankylogo.NewMemoryStore() // configure a new in-memory store
     config := ankylogo.NewConfig(
-        // Token Bucket Algorithm is not initialized
+        // Sliding Window is not initialized — only token bucket enforced
         ankylogo.WithTokenBucket(10, 1, time.Second),  // burst of 10, refill 1/sec
     )
 
@@ -189,11 +189,15 @@ engine := ankylogo.NewRedisRiskEngine(
 
 ```go
 // Linear — subtract 1 point every 10 minutes
-ankylogo.WithDecayRate(10 * time.Minute)
+engine := ankylogo.NewRiskEngine(kafkaClient, 15, "rate-limit-events",
+    ankylogo.WithDecayRate(10 * time.Minute),
+)
 
 // Half-life — halve the score every 30 minutes
-ankylogo.WithHalfLifeDecay()
-ankylogo.WithDecayRate(30 * time.Minute)
+engine := ankylogo.NewRiskEngine(kafkaClient, 15, "rate-limit-events",
+    ankylogo.WithHalfLifeDecay(),
+    ankylogo.WithDecayRate(30 * time.Minute),
+)
 ```
 
 ### Custom Weights
