@@ -5,10 +5,12 @@
 
 # ankyloGo
 
-A rate limiting middleware for [Gin](https://github.com/gin-gonic/gin) that enforces per-IP limits using a **token bucket** and **sliding window** working in tandem. Both algorithms must pass for a request to proceed.
+A rate limiting middleware for [Gin](https://github.com/gin-gonic/gin) that enforces per-IP limits using **token bucket** or **sliding window** algorithms, they can be configured to work together to stop bursts of requests and sustained attacks or one algorithm can be chosen. 
 
 Optionally integrates a Kafka-backed **risk engine** that accumulates an abuse score per IP based on traffic patterns and dynamically tightens limits — no static rules required.
+Also integrates Prometheus with Grafana for production observability. 
 
+### Run this in your terminal to download the ankyloGo package
 ```
 go get github.com/arryllopez/ankyloGo
 ```
@@ -16,21 +18,14 @@ go get github.com/arryllopez/ankyloGo
 ---
 
 ## How It Works
+<img width="560" height="1442" alt="image" src="https://github.com/user-attachments/assets/3d00a1fc-78f1-411f-8482-42f9b01b787e" />
 
-```
-Request → IP extraction
-        → [Optional] Risk score lookup → adjust limits or deny immediately
-        → Sliding window check → deny or continue
-        → Token bucket check  → deny or continue
-        → c.Next()
-        → [Optional] Publish event to Kafka
-```
 
 - **Sliding window** — enforces a sustained request cap over a rolling time period (e.g. 100 req/min).
 - **Token bucket** — handles burst control. Tokens refill at a fixed rate; an empty bucket denies the request.
 - **Risk engine** — Kafka consumer running as a goroutine. Accumulates an integer score per IP from rate limit events. Higher scores progressively reduce effective limits. At the configured threshold, the IP is blocked until the score decays.
 
-Scores decay automatically — no IP is punished indefinitely.
+Scores decay automatically — no IP is punished indefinitely. Utilizes a configurable half life decay or a linear decay
 
 ---
 
@@ -38,14 +33,14 @@ Scores decay automatically — no IP is punished indefinitely.
 
 | Store | When to use |
 |---|---|
-| `MemoryStore` | Single-server. Fast, zero dependencies. State lost on restart. |
-| `RedisStore` | Distributed / multi-instance. Atomic Lua scripts. Fails open on Redis errors. |
+| `MemoryStore` | Runs within your computers memory, state is wiped upon restart. Great for development environments|
+| `RedisStore` | Redis system for distributed / multi-instance. Atomic Lua scripts. Fails open on Redis errors. |
 
 ---
 
 ## Quick Start
 
-**Memory store, no external dependencies:**
+**Memory store**
 
 ```go
 import (
@@ -57,8 +52,9 @@ import (
 func main() {
     router := gin.Default()
 
-    store  := ankylogo.NewMemoryStore()
+    store  := ankylogo.NewMemoryStore() // configure a new in-memory store
     config := ankylogo.NewConfig(
+        // if one is not desired, do not initialize 
         ankylogo.WithSlidingWindow(60, 100),           // 100 requests per 60s
         ankylogo.WithTokenBucket(10, 1, time.Second),  // burst of 10, refill 1/sec
     )
@@ -67,6 +63,29 @@ func main() {
     router.Run(":8080")
 }
 ```
+If only one algorithm is desired
+```go
+import (
+    "time"
+    ankylogo "github.com/arryllopez/ankyloGo"
+    "github.com/gin-gonic/gin"
+)
+
+func main() {
+    router := gin.Default()
+
+    store  := ankylogo.NewMemoryStore() // configure a new in-memory store
+    config := ankylogo.NewConfig(
+        // Token Bucket Algorithm is not initialized
+        ankylogo.WithTokenBucket(10, 1, time.Second),  // burst of 10, refill 1/sec
+    )
+
+    router.Use(ankylogo.RateLimiterMiddleware(store, config))
+    router.Run(":8080")
+}
+```
+
+
 
 **Redis store:**
 
@@ -151,6 +170,7 @@ config := ankylogo.NewConfig(
 ```
 
 `WithRiskEngine` starts the Kafka consumer goroutine automatically.
+All rate limiting events are now underneath the Kafka topic  **"rate-limit-events"**
 
 **Redis-backed engine (distributed):**
 
@@ -177,6 +197,13 @@ ankylogo.WithDecayRate(30 * time.Minute)
 ```
 
 ### Custom Weights
+| Method | Description |
+|--------|-------------|
+| `WithWeightAllowed()` | Risk score added when request is allowed |
+| `WithWeightWindow()` | Risk score added when request is blocked by the sliding window algorithm |
+| `WithWeightBucket()` | Risk score added when request is blocked by the token bucket algorithm |
+| `WithWeightPassedThreshold()` | Risk score added when request is blocked after already passing the threshold |
+
 
 ```go
 engine := ankylogo.NewRiskEngine(kafkaClient, 15, "rate-limit-events",
@@ -189,7 +216,7 @@ engine := ankylogo.NewRiskEngine(kafkaClient, 15, "rate-limit-events",
 
 ### Threshold Notifications
 
-Called once when an IP first crosses the deny threshold. Re-arms automatically when the score decays back below the threshold.
+Called once when an IP first crosses the deny threshold. Re-arms automatically when the score decays back below the threshold. 
 
 ```go
 type myNotifier struct{}
@@ -217,7 +244,7 @@ Three metrics are available. All are opt-in.
 | `ankylosaur_threshold_crossings_total` | Counter | — | Unique IPs that crossed the risk threshold |
 | `ankylosaur_middleware_duration_seconds` | Histogram | `endpoint` | Middleware latency per endpoint |
 
-`action` is one of: `ALLOWED`, `DENIED_WINDOW`, `DENIED_BUCKET`, `DENIED_RISK`.
+`action` is one of 4 types: `ALLOWED`, `DENIED_WINDOW`, `DENIED_BUCKET`, `DENIED_RISK`.
 
 ```go
 import (
