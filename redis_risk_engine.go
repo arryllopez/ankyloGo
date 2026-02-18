@@ -19,6 +19,7 @@ local now         = tonumber(ARGV[1])
 local decayRate   = tonumber(ARGV[2])
 local useHalfLife = tonumber(ARGV[3])
 local eventWeight = tonumber(ARGV[4])
+local ttlSeconds  = tonumber(ARGV[5])
 
 local score       = tonumber(redis.call('HGET', key, 'score'))       or 0
 local lastUpdated = tonumber(redis.call('HGET', key, 'last_updated')) or now
@@ -39,6 +40,9 @@ if score < 0 then score = 0 end
 score = score + eventWeight
 
 redis.call('HSET', key, 'score', score, 'last_updated', now)
+if ttlSeconds > 0 then
+    redis.call('EXPIRE', key, ttlSeconds)
+end
 return score
 `)
 
@@ -86,6 +90,12 @@ func (r *RedisRiskEngine) processEvent(ctx context.Context, event RateLimitEvent
 		useHalfLife = 1
 	}
 
+	if r.redisTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.redisTimeout)
+		defer cancel()
+	}
+
 	now := time.Now().UnixNano()
 	currentScore, err := redisProcessEventScript.Run(ctx, r.redisClient,
 		[]string{"risk:" + event.IP},
@@ -93,6 +103,7 @@ func (r *RedisRiskEngine) processEvent(ctx context.Context, event RateLimitEvent
 		r.decayRate.Nanoseconds(),
 		useHalfLife,
 		weight,
+		int64(r.keyTTL.Seconds()),
 	).Int()
 	if err != nil {
 		fmt.Printf("redis processEvent error: %v\n", err)

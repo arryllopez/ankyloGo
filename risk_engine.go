@@ -28,6 +28,8 @@ type riskEngineConfig struct {
 	topic                       string
 	decayRate                   time.Duration
 	useHalfLife                 bool
+	keyTTL                      time.Duration // Redis only: how long before an idle risk key expires (0 = never)
+	redisTimeout                time.Duration // Redis only: per-call timeout for processEvent (0 = no timeout)
 	OnThreshold                 ThresholdNotifier
 	customWeightAllowed         int
 	customWeightWindow          int
@@ -84,6 +86,22 @@ func WithDecayRate(rate time.Duration) RiskEngineOption {
 func WithHalfLifeDecay() RiskEngineOption {
 	return func(c *riskEngineConfig) {
 		c.useHalfLife = true
+	}
+}
+
+// WithKeyTTL sets how long a Redis risk key persists after its last update (0 = never expires).
+// Only has effect on RedisRiskEngine.
+func WithKeyTTL(ttl time.Duration) RiskEngineOption {
+	return func(c *riskEngineConfig) {
+		c.keyTTL = ttl
+	}
+}
+
+// WithRedisTimeout sets a per-call timeout for Redis operations in processEvent (0 = no timeout).
+// Only has effect on RedisRiskEngine.
+func WithRedisTimeout(timeout time.Duration) RiskEngineOption {
+	return func(c *riskEngineConfig) {
+		c.redisTimeout = timeout
 	}
 }
 
