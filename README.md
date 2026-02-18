@@ -5,142 +5,351 @@
 
 # ankyloGo
 
-ankyloGo is the first installment of the Ankylo series of rate limiters.AnkyloGo currently operates within the Gin framework in the go language. These rate limiters are abuse aware and watch how traffic behaves and adjusts instead of enforcing static rules. 
-I plan to incorporate more frameworks in different languages.
+A rate limiting middleware for [Gin](https://github.com/gin-gonic/gin) that enforces per-IP limits using a **token bucket** and **sliding window** working in tandem. Both algorithms must pass for a request to proceed.
 
-Getting started with ankyloGo
+Optionally integrates a Kafka-backed **risk engine** that accumulates an abuse score per IP based on traffic patterns and dynamically tightens limits — no static rules required.
+
+```
+go get github.com/arryllopez/ankyloGo
+```
+
+---
+
+## How It Works
+
+```
+Request → IP extraction
+        → [Optional] Risk score lookup → adjust limits or deny immediately
+        → Sliding window check → deny or continue
+        → Token bucket check  → deny or continue
+        → c.Next()
+        → [Optional] Publish event to Kafka
+```
+
+- **Sliding window** — enforces a sustained request cap over a rolling time period (e.g. 100 req/min).
+- **Token bucket** — handles burst control. Tokens refill at a fixed rate; an empty bucket denies the request.
+- **Risk engine** — Kafka consumer running as a goroutine. Accumulates an integer score per IP from rate limit events. Higher scores progressively reduce effective limits. At the configured threshold, the IP is blocked until the score decays.
+
+Scores decay automatically — no IP is punished indefinitely.
+
+---
+
+## Stores
+
+| Store | When to use |
+|---|---|
+| `MemoryStore` | Single-server. Fast, zero dependencies. State lost on restart. |
+| `RedisStore` | Distributed / multi-instance. Atomic Lua scripts. Fails open on Redis errors. |
+
+---
+
+## Quick Start
+
+**Memory store, no external dependencies:**
 
 ```go
-import "github.com/arryllopez/ankylosaur/ankylogo"
+import (
+    "time"
+    ankylogo "github.com/arryllopez/ankyloGo"
+    "github.com/gin-gonic/gin"
+)
 
-router.Use(ankylogo.New(ankylogo.Config{
-    Storage: redisStore,
-}))
+func main() {
+    router := gin.Default()
+
+    store  := ankylogo.NewMemoryStore()
+    config := ankylogo.NewConfig(
+        ankylogo.WithSlidingWindow(60, 100),           // 100 requests per 60s
+        ankylogo.WithTokenBucket(10, 1, time.Second),  // burst of 10, refill 1/sec
+    )
+
+    router.Use(ankylogo.RateLimiterMiddleware(store, config))
+    router.Run(":8080")
+}
 ```
 
-## What It Does
+**Redis store:**
 
-A token bucket + sliding window rate limiter with a feedback loop. The rate limiter enforces limits. A separate risk engine watches access patterns via Kafka and adjusts those limits per actor in real time.
+```go
+redisClient := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+store  := ankylogo.NewRedisStore(redisClient)
+config := ankylogo.NewConfig(
+    ankylogo.WithSlidingWindow(60, 100),
+    ankylogo.WithTokenBucket(10, 1, time.Second),
+)
 
-```
-Request → Extract Identity (IP / API Key)
-        → Check Local Cache (L1)
-        → Check Redis (L2)
-        → Token Bucket + Sliding Window → ALLOW or DENY
-        → Async publish access log to Kafka
-                    ↓
-              Risk Engine (Kafka consumer, separate process)
-                    ↓
-              Writes risk score back to Redis
-                    ↓
-              Gateway reads score on next request → adjusts limits
+router.Use(ankylogo.RateLimiterMiddleware(store, config))
 ```
 
-## More about the algorithms
-*Diagrams adapted from ByteByteGo* 
+---
 
-At its core, the token bucket algorithm looks like: 
-<img width="1069" height="610" alt="image" src="https://github.com/user-attachments/assets/6c174ee5-b826-475e-ab60-16f3d8ea0b6c" />
+## Per-Endpoint Policies
 
-The sliding window algorithm looks like this: 
-<img width="1400" height="604" alt="image" src="https://github.com/user-attachments/assets/cb1f7568-80d4-42d4-8f77-61b445072eac" />
+Pass a policy map as the third argument. Routes not in the map fall back to the global config. Keys match `"METHOD /path"`.
 
-The sliding window log uses O(n) memory per user where n is the number of requests within the window
+```go
+policies := map[string]ankylogo.Config{
+    "POST /login": ankylogo.NewConfig(
+        ankylogo.WithSlidingWindow(60, 10),
+        ankylogo.WithTokenBucket(5, 1, time.Second),
+    ),
+    "POST /purchase": ankylogo.NewConfig(
+        ankylogo.WithSlidingWindow(60, 5),
+        ankylogo.WithTokenBucket(3, 1, time.Second),
+    ),
+}
 
-## Rate Limiting
+router.Use(ankylogo.RateLimiterMiddleware(store, config, policies))
+```
 
-Two algorithms, both must pass:
-
-- **Token Bucket** — handles bursts. Tokens refill at a steady rate. If the bucket is empty, request is denied. Allows legitimate traffic spikes while capping sustained abuse.
-- **Sliding Window Counter** — enforces sustained rate caps. Uses weighted interpolation across current and previous windows for accuracy without storing every timestamp.
-
-Limits are tracked **per IP** and **per API key** independently.
-
-## Endpoint Risk Profiles
-
-Different endpoints get different treatment:
-
-| Endpoint | Risk | Bucket Size | Refill | Window Limit | Fail Mode | Cost |
-|---|---|---|---|---|---|---|
-| `GET /ping` | Low | 1000 | 100/s | — | Open | 1 |
-| `POST /login` | High | 20 | 2/s | 10/min | Closed | 2 (+5 on failure) |
-| `GET /search` | Medium | 50 | 5/s | — | Open | 1 |
-| `POST /purchase` | Critical | 10 | 1/s | 5/min | Closed | 5 |
-
-**Fail-open:** If Redis is unreachable, `/ping` and `/search` still serve traffic.
-**Fail-closed:** `/login` and `/purchase` deny requests when state can't be verified.
-
-## Storage
-
-Two-tier architecture:
-
-- **L1 — In-memory LRU cache** for hot keys. 1-second TTL. Only caches "comfortably allowed" decisions (tokens > 20% capacity). Reduces Redis roundtrips ~80%.
-- **L2 — Redis** is the source of truth. All writes go to Redis. Atomic check-and-decrement via Lua scripts. Singleflight prevents cache stampedes on L1 miss.
-
-## Kafka Pipeline
-
-The middleware async-publishes an access log event for every request. A bounded in-memory queue sits between the middleware and the Kafka producer. If the queue fills up, events are dropped — the request path is never blocked by observability.
-
-Access log events include: actor hash, endpoint, method, status code, user agent, decision, timestamps.
+---
 
 ## Risk Engine
 
-A separate Kafka consumer process that scores actors based on five pattern detectors:
+The risk engine consumes rate limit events from Kafka and adjusts limits per IP in real time.
 
-| Pattern | Weight | What It Detects |
-|---|---|---|
-| Failed auth storms | 0.35 | Rapid 401/403 responses — credential stuffing |
-| Geo jumps | 0.25 | Impossible travel between consecutive requests |
-| User-Agent churn | 0.15 | Frequent UA rotation — bot behavior |
-| Endpoint cardinality | 0.15 | Too many unique endpoints — API scraping |
-| Request spikes | 0.10 | Current rate vs historical baseline |
+**Default event weights:**
 
-Final score = weighted sum, range 0.0–1.0. Scores decay with a 30-minute half-life — no permanent bans.
-
-## Dynamic Enforcement
-
-The gateway reads the actor's risk score from Redis on each request and adjusts limits:
-
-| Score | Action |
+| Event | Default weight |
 |---|---|
-| < 0.3 | Normal limits |
-| 0.3 – 0.5 | Reduce burst capacity (0.7x) |
-| 0.5 – 0.7 | Increase request cost (2x) |
-| 0.7 – 0.85 | Require step-up auth on high/critical endpoints |
-| >= 0.85 | Cooldown — deny all requests for 5 minutes |
+| `ALLOWED` | 0 |
+| `DENIED_WINDOW` | 1 |
+| `DENIED_BUCKET` | 4 |
+| `DENIED_RISK` | 10 |
 
-Graduated response. Requires 2+ correlated signals before any action. Grace period for new actors.
+When an IP's score reaches `denyScore`, all its requests are denied with `403 Forbidden` until the score decays back below the threshold.
 
-## Replay Tool
+Two implementations are provided:
 
-CLI tool to simulate traffic patterns against the gateway and observe decisions in logs:
+| Engine | Scores stored in | Use when |
+|---|---|---|
+| `RiskEngine` | In-process memory | Single server |
+| `RedisRiskEngine` | Redis | Multi-instance — scores are shared |
 
-- **Credential stuffing** — rapid failed logins from rotating IPs
-- **Scraper** — steady enumeration of search endpoints
-- **Legitimate burst** — short spike from a single user
+**In-memory engine:**
 
-## Infrastructure
+```go
+import (
+    "context"
+    ankylogo "github.com/arryllopez/ankyloGo"
+    "github.com/twmb/franz-go/pkg/kgo"
+)
 
-Requires Redis and Kafka. Docker Compose config included for local dev:
+kafkaClient, _ := kgo.NewClient(
+    kgo.SeedBrokers("localhost:9092"),
+    kgo.ConsumeTopics("rate-limit-events"),
+)
+
+engine := ankylogo.NewRiskEngine(kafkaClient, 15, "rate-limit-events")
+
+config := ankylogo.NewConfig(
+    ankylogo.WithSlidingWindow(60, 100),
+    ankylogo.WithTokenBucket(10, 1, time.Second),
+    ankylogo.WithEventPublisher(ankylogo.NewKafkaPublisher(kafkaClient, "rate-limit-events")),
+    ankylogo.WithRiskEngine(context.Background(), engine, 15), // deny at score >= 15
+)
+```
+
+`WithRiskEngine` starts the Kafka consumer goroutine automatically.
+
+**Redis-backed engine (distributed):**
+
+```go
+engine := ankylogo.NewRedisRiskEngine(
+    kafkaClient,
+    redisClient,
+    15,
+    "rate-limit-events",
+    ankylogo.WithKeyTTL(24 * time.Hour),            // auto-expire idle IPs
+    ankylogo.WithRedisTimeout(100 * time.Millisecond),
+)
+```
+
+### Score Decay
+
+```go
+// Linear — subtract 1 point every 10 minutes
+ankylogo.WithDecayRate(10 * time.Minute)
+
+// Half-life — halve the score every 30 minutes
+ankylogo.WithHalfLifeDecay()
+ankylogo.WithDecayRate(30 * time.Minute)
+```
+
+### Custom Weights
+
+```go
+engine := ankylogo.NewRiskEngine(kafkaClient, 15, "rate-limit-events",
+    ankylogo.WithWeightAllowed(0),
+    ankylogo.WithWeightWindow(2),
+    ankylogo.WithWeightBucket(5),
+    ankylogo.WithWeightPassedThreshold(15),
+)
+```
+
+### Threshold Notifications
+
+Called once when an IP first crosses the deny threshold. Re-arms automatically when the score decays back below the threshold.
+
+```go
+type myNotifier struct{}
+
+func (n *myNotifier) Notify(ip string, score int) {
+    log.Printf("IP %s hit risk threshold at score %d", ip, score)
+}
+
+engine := ankylogo.NewRiskEngine(kafkaClient, 15, "rate-limit-events",
+    ankylogo.WithThresholdNotifier(&myNotifier{}),
+)
+```
+
+---
+
+## Observability
+
+### Prometheus
+
+Three metrics are available. All are opt-in.
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `ankylosaur_requests_total` | Counter | `action`, `endpoint` | Every rate limit decision |
+| `ankylosaur_threshold_crossings_total` | Counter | — | Unique IPs that crossed the risk threshold |
+| `ankylosaur_middleware_duration_seconds` | Histogram | `endpoint` | Middleware latency per endpoint |
+
+`action` is one of: `ALLOWED`, `DENIED_WINDOW`, `DENIED_BUCKET`, `DENIED_RISK`.
+
+```go
+import (
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+config := ankylogo.NewConfig(
+    ankylogo.WithSlidingWindow(60, 100),
+    ankylogo.WithTokenBucket(10, 1, time.Second),
+    ankylogo.WithPrometheusMetrics(prometheus.DefaultRegisterer),   // requests counter
+    ankylogo.WithMiddlewareLatency(prometheus.DefaultRegisterer),   // latency histogram
+)
+
+router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+```
+
+`WithPrometheusMetrics` wraps any existing event publisher, so Kafka and Prometheus work together:
+
+```go
+ankylogo.WithEventPublisher(ankylogo.NewKafkaPublisher(kafkaClient, "rate-limit-events")),
+ankylogo.WithPrometheusMetrics(prometheus.DefaultRegisterer), // wraps the Kafka publisher
+```
+
+**Threshold crossings counter** — wire into the risk engine:
+
+```go
+notifier := ankylogo.NewPrometheusThresholdNotifier(prometheus.DefaultRegisterer)
+
+engine := ankylogo.NewRiskEngine(kafkaClient, 15, "rate-limit-events",
+    ankylogo.WithThresholdNotifier(notifier),
+)
+```
+
+### Grafana + Prometheus (local dev)
+
+A Docker Compose stack is included in `monitoring/`:
 
 ```
-redis:7          — distributed rate limit state
-zookeeper+kafka  — access log pipeline
-gateway          — your Gin app with ankyloGo middleware
-consumer         — risk engine (can run multiple replicas)
+cd monitoring
+docker compose up -d
 ```
 
-## Status
+| Service | URL | Credentials |
+|---|---|---|
+| Prometheus | http://localhost:9090 | — |
+| Grafana | http://localhost:3000 | admin / admin |
 
-Work in progress. Stub product API endpoints are set up. Core middleware implementation is next.
+Prometheus scrapes your app at `host.docker.internal:8081`. Grafana auto-provisions Prometheus as a datasource.
 
-## Key Tradeoffs
+---
 
-These are the design decisions that make this more than a toy:
+## Configuration Reference
 
-- **Redis vs memory** — hot reads cached locally, all writes and near-limit decisions go to Redis
-- **Stampede avoidance** — singleflight deduplicates concurrent Redis fetches for the same key
-- **Idempotency** — `/purchase` retries with the same idempotency key don't double-count against limits
-- **At-least-once delivery** — Kafka may duplicate events; risk engine tolerates this because scoring is aggregate
-- **Backpressure** — bounded queue, drop on overflow, never block the request path
-- **False positives** — graduated response, auto-decay, allowlists, multi-signal requirement
+### `NewConfig` options
+
+| Option | Description |
+|---|---|
+| `WithSlidingWindow(window int64, limit int)` | Window in seconds, max requests per window |
+| `WithTokenBucket(capacity, tokensPerInterval int, refillRate time.Duration)` | Burst capacity, refill amount, refill interval |
+| `WithEventPublisher(publisher EventPublisher)` | Kafka or custom publisher |
+| `WithRiskEngine(ctx, engine RiskScorer, denyScore int)` | Attach engine and start consumer goroutine |
+| `WithRiskScoring(scoreReader ScoreReader, denyScore int)` | Attach a ScoreReader without starting a goroutine |
+| `WithPrometheusMetrics(reg prometheus.Registerer)` | Enable `ankylosaur_requests_total` |
+| `WithMiddlewareLatency(reg prometheus.Registerer)` | Enable `ankylosaur_middleware_duration_seconds` |
+
+### `RiskEngineOption` options
+
+| Option | Description |
+|---|---|
+| `WithWeightAllowed(w int)` | Score delta for allowed requests (default: 0) |
+| `WithWeightWindow(w int)` | Score delta for window denials (default: 1) |
+| `WithWeightBucket(w int)` | Score delta for bucket denials (default: 4) |
+| `WithWeightPassedThreshold(w int)` | Score delta for risk denials (default: 10) |
+| `WithDecayRate(d time.Duration)` | Interval between decay steps |
+| `WithHalfLifeDecay()` | Exponential (half-life) decay instead of linear |
+| `WithThresholdNotifier(n ThresholdNotifier)` | Callback on first threshold crossing per IP |
+| `WithKeyTTL(ttl time.Duration)` | _(Redis only)_ Auto-expire idle IP keys |
+| `WithRedisTimeout(t time.Duration)` | _(Redis only)_ Per-operation context timeout |
+
+---
+
+## Interfaces
+
+Implement these to extend ankyloGo without modifying it.
+
+```go
+// EventPublisher receives a decision event after each request.
+type EventPublisher interface {
+    Publish(event RateLimitEvent)
+}
+
+// ScoreReader returns the current risk score for an IP.
+type ScoreReader interface {
+    GetScore(ip string) int
+}
+
+// RiskScorer is implemented by RiskEngine and RedisRiskEngine.
+type RiskScorer interface {
+    GetScore(ip string) int
+    EventReader(ctx context.Context)
+}
+
+// ThresholdNotifier fires once when an IP first crosses the deny threshold.
+type ThresholdNotifier interface {
+    Notify(ip string, score int)
+}
+
+// RateLimiterStore is the storage backend for rate limit state.
+type RateLimiterStore interface {
+    AllowedSlidingWindow(ip string, window int64, limit int) bool
+    AllowedTokenBucket(ip string, capacity, tokensPerInterval int, refillRate time.Duration) bool
+}
+```
+
+`RateLimitEvent` fields: `IP`, `Endpoint`, `Action`, `Timestamp`, `UserAgent`, `StatusCode`.
+
+---
+
+## Requirements
+
+| Dependency | Required for |
+|---|---|
+| [gin-gonic/gin](https://github.com/gin-gonic/gin) | Middleware (always required) |
+| [redis/go-redis](https://github.com/redis/go-redis) | `RedisStore`, `RedisRiskEngine` |
+| [twmb/franz-go](https://github.com/twmb/franz-go) | `KafkaPublisher`, `RiskEngine`, `RedisRiskEngine` |
+| [prometheus/client_golang](https://github.com/prometheus/client_golang) | Prometheus metrics |
+
+All dependencies except Gin are optional. Use only what your setup requires.
+
+---
+
+## License
+
+MIT
