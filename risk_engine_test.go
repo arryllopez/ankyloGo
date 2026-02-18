@@ -8,12 +8,14 @@ import (
 // Helper to create a test RiskEngine with default weights (0, 1, 4, 10)
 func newTestEngine(threshold int, decayRate time.Duration) *RiskEngine {
 	return &RiskEngine{
-		threshold:                   threshold,
-		decayRate:                   decayRate,
-		customWeightAllowed:         0,
-		customWeightWindow:          1,
-		customWeightBucket:          4,
-		customWeightPassedThreshold: 10,
+		riskEngineConfig: riskEngineConfig{
+			threshold:                   threshold,
+			decayRate:                   decayRate,
+			customWeightAllowed:         0,
+			customWeightWindow:          1,
+			customWeightBucket:          4,
+			customWeightPassedThreshold: 10,
+		},
 	}
 }
 
@@ -321,15 +323,10 @@ After one half-life: int(8 * 0.5^1) = 4.
 We allow 3–4 due to slight timing variance (elapsed > 100ms when GetScore runs).
 */
 func TestWithHalfLifeDecay(t *testing.T) {
-	engine := &RiskEngine{
-		threshold:                   20,
-		decayRate:                   100 * time.Millisecond,
-		useHalfLife:                 true,
-		customWeightAllowed:         0,
-		customWeightWindow:          1,
-		customWeightBucket:          4,
-		customWeightPassedThreshold: 10,
-	}
+	engine := NewRiskEngine(nil, 20, "",
+		WithDecayRate(100*time.Millisecond),
+		WithHalfLifeDecay(),
+	)
 
 	event := RateLimitEvent{
 		IP:        "192.168.10.1",

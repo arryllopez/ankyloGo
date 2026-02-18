@@ -22,95 +22,96 @@ type ThresholdNotifier interface {
 	Notify(ip string, score int)
 }
 
-type RiskEngine struct {
-	client                      *kgo.Client
-	ipScores                    sync.Map
+// riskEngineConfig holds all shared configuration for risk engine implementations.
+type riskEngineConfig struct {
 	threshold                   int
 	topic                       string
 	decayRate                   time.Duration
+	useHalfLife                 bool
 	OnThreshold                 ThresholdNotifier
 	customWeightAllowed         int
-	customWeightBucket          int
 	customWeightWindow          int
+	customWeightBucket          int
 	customWeightPassedThreshold int
-	useHalfLife                 bool
 }
 
-// RiskEngineOption is a function that configures a RiskEngine
-type RiskEngineOption func(*RiskEngine)
+// RiskEngineOption configures a riskEngineConfig, applying to any engine implementation.
+type RiskEngineOption func(*riskEngineConfig)
 
 // WithWeightAllowed sets the weight for ALLOWED events (default: 0)
 func WithWeightAllowed(weight int) RiskEngineOption {
-	return func(r *RiskEngine) {
-		r.customWeightAllowed = weight
+	return func(c *riskEngineConfig) {
+		c.customWeightAllowed = weight
 	}
 }
 
 // WithWeightWindow sets the weight for DENIED_WINDOW events (default: 1)
 func WithWeightWindow(weight int) RiskEngineOption {
-	return func(r *RiskEngine) {
-		r.customWeightWindow = weight
+	return func(c *riskEngineConfig) {
+		c.customWeightWindow = weight
 	}
 }
 
 // WithWeightBucket sets the weight for DENIED_BUCKET events (default: 4)
 func WithWeightBucket(weight int) RiskEngineOption {
-	return func(r *RiskEngine) {
-		r.customWeightBucket = weight
+	return func(c *riskEngineConfig) {
+		c.customWeightBucket = weight
 	}
 }
 
 // WithWeightPassedThreshold sets the weight for DENIED_RISK events (default: 10)
 func WithWeightPassedThreshold(weight int) RiskEngineOption {
-	return func(r *RiskEngine) {
-		r.customWeightPassedThreshold = weight
+	return func(c *riskEngineConfig) {
+		c.customWeightPassedThreshold = weight
 	}
 }
 
 // WithThresholdNotifier sets a custom threshold notifier
 func WithThresholdNotifier(notifier ThresholdNotifier) RiskEngineOption {
-	return func(r *RiskEngine) {
-		r.OnThreshold = notifier
+	return func(c *riskEngineConfig) {
+		c.OnThreshold = notifier
 	}
 }
 
 // WithDecayRate sets the decay rate (default: 0 - no decay)
 func WithDecayRate(rate time.Duration) RiskEngineOption {
-	return func(r *RiskEngine) {
-		r.decayRate = rate
+	return func(c *riskEngineConfig) {
+		c.decayRate = rate
 	}
 }
 
+// WithHalfLifeDecay switches decay from linear to exponential half-life mode.
 func WithHalfLifeDecay() RiskEngineOption {
-	return func(r *RiskEngine) {
-		r.useHalfLife = true
+	return func(c *riskEngineConfig) {
+		c.useHalfLife = true
 	}
 }
 
-// NewRiskEngine creates a new RiskEngine with default weights (0, 1, 4, 10)
-// Required parameters: client, threshold, topic
-// Optional parameters: use With* option functions
+type RiskEngine struct {
+	client   *kgo.Client
+	ipScores sync.Map
+	riskEngineConfig
+}
+
+// NewRiskEngine creates a new RiskEngine with default weights (0, 1, 4, 10).
+// Required parameters: client, threshold, topic.
+// Optional parameters: use With* option functions.
 func NewRiskEngine(client *kgo.Client, threshold int, topic string, opts ...RiskEngineOption) *RiskEngine {
-	// Create engine with defaults
-	engine := &RiskEngine{
-		client:                      client,
+	cfg := riskEngineConfig{
 		threshold:                   threshold,
 		topic:                       topic,
-		decayRate:                   0,   // default: no decay
-		OnThreshold:                 nil, // default: no notifier
-		customWeightAllowed:         0,   // default: 0
-		customWeightWindow:          1,   // default: 1
-		customWeightBucket:          4,   // default: 4
-		customWeightPassedThreshold: 10,  // default: 10
-		ipScores:                    sync.Map{},
+		customWeightAllowed:         0,
+		customWeightWindow:          1,
+		customWeightBucket:          4,
+		customWeightPassedThreshold: 10,
 	}
-
-	// Apply custom options
 	for _, opt := range opts {
-		opt(engine)
+		opt(&cfg)
 	}
-
-	return engine
+	return &RiskEngine{
+		client:           client,
+		riskEngineConfig: cfg,
+	}
 }
 
 func NewRiskScore(score int, lastUpdated time.Time) *RiskScore {
