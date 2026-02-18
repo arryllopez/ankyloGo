@@ -1,6 +1,7 @@
 package ankylogo
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"time"
@@ -11,6 +12,13 @@ import (
 // ScoreReader returns the current risk score for an IP
 type ScoreReader interface {
 	GetScore(ip string) int
+}
+
+// RiskScorer is implemented by both RiskEngine and RedisRiskEngine.
+// Pass one to WithRiskEngine to wire up score reading and event consuming in one step.
+type RiskScorer interface {
+	GetScore(ip string) int
+	EventReader(ctx context.Context)
 }
 
 type Config struct {
@@ -56,11 +64,22 @@ func WithEventPublisher(publisher EventPublisher) ConfigOption {
 	}
 }
 
-// WithRiskScoring enables risk-based progressive throttling
+// WithRiskScoring enables risk-based progressive throttling.
+// Use this when you manage EventReader yourself, or for testing with a mock ScoreReader.
 func WithRiskScoring(scoreReader ScoreReader, denyScore int) ConfigOption {
 	return func(c *Config) {
 		c.ScoreReader = scoreReader
 		c.DenyScore = denyScore
+	}
+}
+
+// WithRiskEngine wires up a RiskEngine or RedisRiskEngine in one step:
+// sets it as the ScoreReader and starts its EventReader goroutine automatically.
+func WithRiskEngine(ctx context.Context, engine RiskScorer, denyScore int) ConfigOption {
+	return func(c *Config) {
+		c.ScoreReader = engine
+		c.DenyScore = denyScore
+		go engine.EventReader(ctx)
 	}
 }
 

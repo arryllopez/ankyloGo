@@ -53,7 +53,7 @@ type RedisRiskEngine struct {
 	riskEngineConfig
 }
 
-func NewRedisRiskEngine(client *kgo.Client, redisClient *redis.Client, topic string, threshold int, opts ...RiskEngineOption) *RedisRiskEngine {
+func NewRedisRiskEngine(client *kgo.Client, redisClient *redis.Client, threshold int, topic string, opts ...RiskEngineOption) *RedisRiskEngine {
 	cfg := riskEngineConfig{
 		threshold:                   threshold,
 		topic:                       topic,

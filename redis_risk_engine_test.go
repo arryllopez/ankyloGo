@@ -9,7 +9,7 @@ import (
 )
 
 func newTestRedisEngine(redisClient *redis.Client, threshold int, decayRate time.Duration) *RedisRiskEngine {
-	return NewRedisRiskEngine(nil, redisClient, "", threshold,
+	return NewRedisRiskEngine(nil, redisClient, threshold, "",
 		WithDecayRate(decayRate),
 	)
 }
