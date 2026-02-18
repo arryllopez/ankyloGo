@@ -8,6 +8,8 @@ import (
 
 	ankylogo "github.com/arryllopez/ankyloGo"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -20,17 +22,23 @@ func main() {
 	// Using MemoryStore - stores rate limit data in application memory
 	// Good for single-server deployments, data is lost on restart
 	memoryStore := ankylogo.NewMemoryStore()
-	ankyConfig := ankylogo.DefaultConfig()
-
 	// Kafka event publisher - publishes rate limit events to Kafka
 	kafkaClient, err := kgo.NewClient(kgo.SeedBrokers("localhost:9092"))
 	if err != nil {
 		log.Fatalf("failed to create kafka client: %v", err)
 	}
 	defer kafkaClient.Close()
-	ankyConfig.EventPublisher = ankylogo.NewKafkaPublisher(kafkaClient, "rate-limit-events")
 
-	router.Use(ankylogo.RateLimiterMiddleware(memoryStore, ankyConfig)) // applying the middleware
+	ankyConfig := ankylogo.NewConfig(
+		ankylogo.WithSlidingWindow(60, 100),
+		ankylogo.WithTokenBucket(10, 1, time.Second),
+		ankylogo.WithEventPublisher(ankylogo.NewKafkaPublisher(kafkaClient, "rate-limit-events")),
+		ankylogo.WithPrometheusMetrics(prometheus.DefaultRegisterer),
+		ankylogo.WithMiddlewareLatency(prometheus.DefaultRegisterer),
+	)
+
+	router.Use(ankylogo.RateLimiterMiddleware(memoryStore, ankyConfig))
+	router.GET("/metrics", gin.WrapH(promhttp.Handler())) // applying the middleware
 
 	// LoggerWithFormatter middleware will write the logs to gin.DefaultWriter
 	// By default gin.DefaultWriter = os.Stdout
