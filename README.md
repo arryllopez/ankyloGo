@@ -4,6 +4,21 @@
 </p>
 
 # ankyloGo
+<p align="center">
+
+
+  <!-- Release -->
+  <a href="https://github.com/arryllopez/ankyloGo/releases">
+    <img src="https://img.shields.io/github/v/release/arryllopez/ankyloGo" />
+  </a>
+
+  <!-- License -->
+  <a href="https://github.com/arryllopez/ankyloGo/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/arryllopez/ankyloGo" />
+  </a>
+</p>
+
+
 
 A rate limiting middleware for [Gin](https://github.com/gin-gonic/gin) that enforces per-IP limits using **token bucket** or **sliding window** algorithms, they can be configured to work together to stop bursts of requests and sustained attacks or one algorithm can be chosen. 
 
